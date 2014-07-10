@@ -193,7 +193,8 @@ class JavadocPopulator
       implements: implements,
       since: since,
       kind: kind,
-      description: description
+      description: description,
+      recognitionKeys: ['com.solveforall.recognition.java.JdkClass']
     }
 
     if @first_document
@@ -266,7 +267,8 @@ class JavadocPopulator
           params: params,
           return_type: return_type,
           kind: 'method',
-          description: description
+          description: description,
+          recognitionKeys: ['com.solveforall.recognition.java.JdkMethod']
         }
 
         out.write(",\n")
