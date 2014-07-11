@@ -1,20 +1,27 @@
 require 'json'
+require 'set'
 require 'nokogiri'
 
+MODIFIER_AND_TYPE_REGEXP = /^[[:space:]]*(([a-z[[:space:]]]+)[[:space:]]+)?(.+)$/
+PARAM_SPLIT_REGEXP = /[[:space:]]*,[[:space:]]*?[\r\n]+[[:space:]]*/
+PARAM_REGEXP = /[[:space:]]*(.+?)[[:space:]]+(\w+)$/
+
+ABBREVIATED_MEMBER_KEYS = [:name, :params, :returnType, :modifiers, :description, :kind].to_set
+
 class JavadocPopulator
-  def initialize(dir_path, output_path)
+  def initialize(dir_path, output_path, debug_mode=false)
     @dir_path = dir_path
     @output_path = output_path
     @first_document = true
+    @debug_mode = debug_mode
 
-    @modifier_and_type_regexp = /^\s*(([a-z\s]+)\s+)?(.+)$/
-    @param_split_regexp = /\s*,\s*?[\r\n]+\s*/
-    #@param_regexp = /\s*(.+)\s+(\w+)\s*$/
-    @param_regexp = /\s*(.+?)[[:space:]]+(\w+)$/
+    #PARAM_REGEXP = /\s*(.+)\s+(\w+)\s*$/
   end
 
   def debug(msg)
-    
+    if @debug_mode
+      puts msg
+    end
   end
   
   def populate
@@ -43,16 +50,28 @@ class JavadocPopulator
           "type" : "string",
           "index" : "not_analyzed"
         },
+        "modifiers" : {
+          "index" : "no"
+        },
         "kind" : {
           "type" : "string",
           "index" : "no"
         },
         "since" : {
+          "type" : "string",
           "index" : "no"
         },
         "description" : {
           "type" : "string",
           "index" : "analyzed"
+        },
+        "name" : {
+          "type" : "string",
+          "index" : "not_analyzed"
+        },
+        "qualifiedName" : {
+          "type" : "string",
+          "index" : "not_analyzed"
         },
         "superClass" : {
           "index" : "no"
@@ -60,14 +79,10 @@ class JavadocPopulator
         "implements" : {
           "index" : "no"
         },
-        "name" : {
-          "type" : "string",
-          "index" : "not_analyzed"
-        },
-        "params" : {
+        "methods" : {
           "index" : "no"
         },
-        "throws" : {
+        "params" : {
           "index" : "no"
         }
       }
@@ -83,7 +98,8 @@ class JavadocPopulator
 
         simple_filename = File.basename(file_path)
 
-        if !file_path.include?('class-use') && /([A-Z][a-z]*)+\.html/.match(simple_filename)
+        if !file_path.include?('class-use') && !file_path.include?('doc-files') &&
+           /([A-Z][a-z]*)+\.html/.match(simple_filename)
 
           abs_file_path = File.expand_path(file_path)
 
@@ -110,8 +126,8 @@ class JavadocPopulator
 
           File.open(file_path) do |f|
             doc = Nokogiri::HTML(f)
-            add_class_or_interface(doc, package_name, class_name, simple_class_name, out)
-            find_methods(doc, package_name, class_name, simple_class_name, out)
+            methods = find_methods(doc, package_name, class_name, simple_class_name, out)
+            add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
             num_classes_found += 1
 
             # if num_classes_found > 10
@@ -128,58 +144,112 @@ class JavadocPopulator
     end
   end
 
-  def add_class_or_interface(doc, package_name, class_name, simple_class_name, out)
-    kind = 'class'
+  private
 
-    title = doc.css('.header h2').text()
-
-    if title.include?('Interface')
-      kind = 'interface'
+  def truncate(s, size=500)
+    unless s
+      return nil
     end
 
-    description = doc.css('.description .block').text().strip.scrub
+    pre_ellipsis_size = size - 3
+    s = s.strip.scrub
+
+    if s && (s.length > pre_ellipsis_size)
+      return s.slice(0, pre_ellipsis_size) + '...'
+    end
+
+    return s
+  end
+
+  def add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
+    kind = 'class'
+
+    title = doc.css('.header h2').text().strip
+
+    if title.start_with?('Interface')
+      kind = 'interface'
+    elsif title.start_with?('Enum')
+      kind = 'enum'
+    elsif title.start_with?('Annotation')
+      kind = 'annotation'
+    end
+
+    modifiers_text = doc.css('.description ul.blockList li.blockList pre').text()
+
+    stop_marker = kind
+    if kind == 'annotation'
+      stop_marker = '@'
+    end
+
+    modifiers_text = modifiers_text.slice(0, modifiers_text.index(stop_marker)).strip
+    modifiers = (modifiers_text.split(PARAM_SPLIT_REGEXP) || []).sort
+
+    description = truncate(doc.css('.description .block').text())
 
     super_class = nil
 
-    super_class_a = doc.css('ul.inheritance li a').last
+    if kind == 'class'
+      super_class_a = doc.css('ul.inheritance li a').last
 
-    if super_class_a
-      super_class = super_class_a.text()
+      if super_class_a
+        super_class = super_class_a.text().strip
+      end
+
+      if !super_class && (kind != 'interface')
+        super_class = 'java.lang.Object'
+      end
     end
 
-    implements = []
+    if kind != 'annotation'
+      implements = []
 
-    dd = doc.css('.description ul.blockList li.blockList dl dd').first
+      dd = nil
 
-    if dd
-      links = dd.css('a')
-
-      implements = (links.collect do |a|
-        title = a.attr('title')
-        package = nil
-
-        m = /.+\s+([\w\.]+)$/.match(title)
-
-        if m
-          package = m[1].strip.scrub
+      if kind == 'interface'
+        dt = doc.css('.description ul.blockList li.blockList dl dt').find do |dt|
+          dt.text.include?('Superinterface')
         end
 
-        simple = a.text().strip.scrub
-
-        if package
-          package + '.' + simple
-        else
-          simple
+        if dt
+          dd = dt.parent.css('dd').first
         end
-      end).sort
+      else
+        dd = doc.css('.description ul.blockList li.blockList dl dd').first
+      end
+
+      # Messes up for Comparable<Date>
+      if dd
+        links = dd.css('a')
+
+        implements = (links.collect do |a|
+          title = a.attr('title')
+          package = nil
+
+          m = /.+[[:space:]]+([\w\.]+)$/.match(title)
+
+          if m
+            package = m[1].strip.scrub
+          end
+
+          simple = a.text().strip.scrub
+
+          if package
+            package + '.' + simple
+          else
+            simple
+          end
+        end).sort
+      end
     end
 
     since = nil
 
-    since_label = doc.css('.description dt .simpleTagLabel').first
+    since_label = doc.css('.description dt').find do |node|
+      node.text().include?("Since:")
+    end
 
     if since_label
-      since = since_label.parent.parent.css('dd').first.text().strip.scrub
+      since = since_label.parent.css('dd').first.text().strip.scrub
     end
 
     #puts "#{class_name} description: '#{description}'"
@@ -189,13 +259,23 @@ class JavadocPopulator
       package: package_name,
       class: simple_class_name,
       qualifiedClass: class_name,
-      superClass: super_class,
-      implements: implements,
+      name: simple_class_name,
+      qualifiedName: class_name,
+      modifiers: modifiers,
       since: since,
       kind: kind,
       description: description,
-      recognitionKeys: ['com.solveforall.recognition.java.JdkClass']
+      recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass']
     }
+
+    if kind == 'class'
+      output_doc[:superClass] = super_class
+      output_doc[:methods] = methods
+      output_doc[:implements] = implements
+    elsif kind == 'interface'
+      output_doc[:methods] = methods
+      output_doc[:implements] = implements
+    end
 
     if @first_document
       @first_document = false
@@ -208,26 +288,42 @@ class JavadocPopulator
     #puts output_doc.to_json
   end
 
+  def abbreviate_member(member)
+    member = member.select do |k, v|
+      ABBREVIATED_MEMBER_KEYS.include?(k)
+    end
+
+    member[:description] = truncate(member[:description], 80)
+
+    return member
+  end
+
   def find_methods(doc, package_name, class_name, simple_class_name, out)
-    doc.css('.memberSummary').each do |table|
+    debug("find_methods for #{class_name}")
+
+    methods = []
+
+    # memberSummary is for JDK 8
+    # overviewSummary is for JDK 7
+    doc.css('.memberSummary, .overviewSummary').each do |table|
       unless table.attr('summary').include?('Method')
+        debug("no methods for #{class_name}")
         next
       end
 
       table.css('tr').each do |tr|
         modifier_and_type = tr.css('td.colFirst').text()
-        m = @modifier_and_type_regexp.match(modifier_and_type)
+        m = MODIFIER_AND_TYPE_REGEXP.match(modifier_and_type)
 
-        unless m
-          puts "Can't get modifier or return type from #{modifier_and_type}!"
+        if !m
+          debug("can't match modifier and type for #{class_name}")
           next
         end
-
 
         modifiers = []
 
         if m[2] && (m[2].length > 0)
-          modifiers = m[2].split(/\s+/).sort
+          modifiers = m[2].split(/[[:space:]]+/).sort
         end
 
         return_type = m[3]
@@ -242,33 +338,22 @@ class JavadocPopulator
         end
 
         method_name = m[1].strip.scrub
-        description = m[3].strip.scrub
+        description = truncate(m[3])
 
         params = parse_parameters(m[2])
 
-        # if method_name == 'write'
-        #   unpacked = text.unpack('H*')
-        #   puts "text = '#{text}', description = '#{unpacked}'"
-        #
-        #
-        #   0.upto(unpacked.length - 1) do |i|
-        #     puts "D#{i} = '#{unpacked[i]}'"
-        #   end
-        #
-        # end
-
         output_doc = {
-          _id: class_name + '#' + method_name,
           package: package_name,
           class: simple_class_name,
           qualifiedClass: class_name,
           name: method_name,
+          qualifiedName: class_name + '.' + method_name,
           modifiers: modifiers,
           params: params,
-          return_type: return_type,
+          returnType: return_type,
           kind: 'method',
           description: description,
-          recognitionKeys: ['com.solveforall.recognition.java.JdkMethod']
+          recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
         }
 
         out.write(",\n")
@@ -276,9 +361,15 @@ class JavadocPopulator
 
         #puts output_doc.to_json
 
+        debug(output_doc.to_json)
+
+        methods << abbreviate_member(output_doc)
       end
     end
 
+    debug("done find_methods for #{class_name}")
+
+    return methods
   end
 
   def parse_parameters(params_text)
@@ -287,11 +378,11 @@ class JavadocPopulator
     if params_text && (params_text.length > 0)
       #puts "got params text '#{params_text}'"
     else
-      return
+      return params
     end
 
-    params_text.split(@param_split_regexp).each do |line|
-      m = @param_regexp.match(line)
+    params_text.split(PARAM_SPLIT_REGEXP).each do |line|
+      m = PARAM_REGEXP.match(line)
       if m
         param = {
             type: m[1],
