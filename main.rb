@@ -6,7 +6,7 @@ MODIFIER_AND_TYPE_REGEXP = /^[[:space:]]*(([a-z[[:space:]]]+)[[:space:]]+)?(.+)$
 PARAM_SPLIT_REGEXP = /[[:space:]]*,[[:space:]]*?[\r\n]+[[:space:]]*/
 PARAM_REGEXP = /[[:space:]]*(.+?)[[:space:]]+(\w+)$/
 
-ABBREVIATED_MEMBER_KEYS = [:name, :params, :returnType, :modifiers, :description, :kind].to_set
+ABBREVIATED_MEMBER_KEYS = [:name, :params, :returnType, :modifiers, :description, :path].to_set
 
 class JavadocPopulator
   def initialize(dir_path, output_path, debug_mode=false)
@@ -38,10 +38,6 @@ class JavadocPopulator
         "enabled" : false
       },
       "properties" : {
-        "package" : {
-          "type" : "string",
-          "index" : "not_analyzed"
-        },
         "class" : {
           "type" : "string",
           "index" : "not_analyzed"
@@ -67,11 +63,18 @@ class JavadocPopulator
         },
         "name" : {
           "type" : "string",
-          "index" : "not_analyzed"
+          "index" : "analyzed"
         },
         "qualifiedName" : {
           "type" : "string",
           "index" : "not_analyzed"
+        },
+        "path" : {
+          "type" : "string",
+          "index" : "no"
+        },
+        "recognitionKeys" : {
+          "index" : "no"
         },
         "superClass" : {
           "index" : "no"
@@ -99,33 +102,27 @@ class JavadocPopulator
         simple_filename = File.basename(file_path)
 
         if !file_path.include?('class-use') && !file_path.include?('doc-files') &&
-           /([A-Z][a-z]*)+\.html/.match(simple_filename)
+           /([A-Z][a-z]*\.)*([A-Z][a-z]*)\.html/.match(simple_filename)
 
           abs_file_path = File.expand_path(file_path)
 
-          class_name = abs_file_path[abs_dir_path.length, abs_file_path.length - abs_dir_path.length]
+          class_name = abs_file_path.slice(abs_dir_path.length, abs_file_path.length - abs_dir_path.length)
 
           if class_name.start_with?(File::SEPARATOR)
-            class_name = class_name[File::SEPARATOR.length, class_name.length - File::SEPARATOR.length]
+            class_name = class_name.slice(File::SEPARATOR.length, class_name.length - File::SEPARATOR.length)
           end
 
-          class_name = class_name[0, class_name.length - 5]
-          class_name = class_name.gsub('/', '.')
+          class_name = class_name.slice(0, class_name.length - 5).gsub('/', '.')
 
-          package_name = ''
-          simple_class_name = class_name
-
-          last_dot_index = class_name.rindex('.')
-
-          if last_dot_index >= 0
-            package_name = class_name[0, last_dot_index]
-            simple_class_name = class_name[last_dot_index + 1, class_name.length - last_dot_index - 1]
-          end
+          simple_class_name = simple_filename.slice(0, simple_filename.length - 5)
 
           puts "Opening file '#{file_path}' for class '#{class_name}' ..."
 
           File.open(file_path) do |f|
             doc = Nokogiri::HTML(f)
+
+            package_name = doc.css('.header .subTitle').text()
+
             methods = find_methods(doc, package_name, class_name, simple_class_name, out)
             add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
             num_classes_found += 1
@@ -159,6 +156,10 @@ class JavadocPopulator
     end
 
     return s
+  end
+
+  def make_class_path(package_name, simple_class_name)
+    return package_name.gsub(/\./, '/') + '/' + simple_class_name + '.html'
   end
 
   def add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
@@ -256,7 +257,6 @@ class JavadocPopulator
 
     output_doc = {
       _id: class_name,
-      package: package_name,
       class: simple_class_name,
       qualifiedClass: class_name,
       name: simple_class_name,
@@ -265,7 +265,8 @@ class JavadocPopulator
       since: since,
       kind: kind,
       description: description,
-      recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass']
+      path: make_class_path(package_name, simple_class_name),
+      recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass'],
     }
 
     if kind == 'class'
@@ -293,7 +294,7 @@ class JavadocPopulator
       ABBREVIATED_MEMBER_KEYS.include?(k)
     end
 
-    member[:description] = truncate(member[:description], 80)
+    member[:description] = truncate(member[:description], 250)
 
     return member
   end
@@ -342,13 +343,19 @@ class JavadocPopulator
 
         params = parse_parameters(m[2])
 
+        anchor_path = tr.css('td.colLast a').first.attr('href')
+
+        pound_index = anchor_path.index('#')
+
+        anchor_path = anchor_path.slice(pound_index, anchor_path.length - pound_index)
+
         output_doc = {
-          package: package_name,
           class: simple_class_name,
           qualifiedClass: class_name,
           name: method_name,
           qualifiedName: class_name + '.' + method_name,
           modifiers: modifiers,
+          path: make_class_path(package_name, simple_class_name) + anchor_path,
           params: params,
           returnType: return_type,
           kind: 'method',
