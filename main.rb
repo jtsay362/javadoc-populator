@@ -2,7 +2,9 @@ require 'json'
 require 'set'
 require 'nokogiri'
 
-MODIFIER_AND_TYPE_REGEXP = /^[[:space:]]*(([a-z[[:space:]]]+)[[:space:]]+)?(.+)$/
+METHOD_SIGNATURE_REGEXP = /^((?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*)((?:public|protected|private|abstract|static|final)[[:space:]]+)*([^(]+?)[[:space:]]+(\w+)[[:space:]]*\(([^)]*)\)[[:space:]]*(?:throws[[:space:]]+(.+))?/
+SPACES_REGEXP = /[[:space:]]+/
+LINE_BREAK_REGEXP = /[[:space:]]*[\r\n]+[[:space:]]*/
 PARAM_SPLIT_REGEXP = /[[:space:]]*,[[:space:]]*?[\r\n]+[[:space:]]*/
 PARAM_REGEXP = /[[:space:]]*(.+?)[[:space:]]+(\w+)$/
 
@@ -46,6 +48,9 @@ class JavadocPopulator
           "type" : "string",
           "index" : "not_analyzed"
         },
+        "annotations" : {
+          "index" : "no"
+        },
         "modifiers" : {
           "index" : "no"
         },
@@ -87,6 +92,17 @@ class JavadocPopulator
         },
         "params" : {
           "index" : "no"
+        },
+        "returnType" : {
+          "type" : "string",
+          "index" : "no"
+        },
+        "returns" : {
+          "type" : "string",
+          "index" : "no"
+        },
+        "throws" : {
+          "index" : "no"
         }
       }
     }
@@ -114,6 +130,10 @@ class JavadocPopulator
 
           class_name = class_name.slice(0, class_name.length - 5).gsub('/', '.')
 
+          # unless class_name == 'java.io.InputStream'
+          #   next
+          # end
+
           simple_class_name = simple_filename.slice(0, simple_filename.length - 5)
 
           puts "Opening file '#{file_path}' for class '#{class_name}' ..."
@@ -124,7 +144,7 @@ class JavadocPopulator
             package_name = doc.css('.header .subTitle').text()
 
             methods = find_methods(doc, package_name, class_name, simple_class_name, out)
-            add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
+            add_class(doc, package_name, class_name, simple_class_name, methods, out)
             num_classes_found += 1
 
             # if num_classes_found > 10
@@ -162,7 +182,7 @@ class JavadocPopulator
     return package_name.gsub(/\./, '/') + '/' + simple_class_name + '.html'
   end
 
-  def add_class_or_interface(doc, package_name, class_name, simple_class_name, methods, out)
+  def add_class(doc, package_name, class_name, simple_class_name, methods, out)
     kind = 'class'
 
     title = doc.css('.header h2').text().strip
@@ -175,7 +195,17 @@ class JavadocPopulator
       kind = 'annotation'
     end
 
-    modifiers_text = doc.css('.description ul.blockList li.blockList pre').text()
+    annotations = []
+
+    pre_text = doc.css('.description ul.blockList li.blockList pre').text().strip
+    modifiers_text = pre_text
+
+    m = /(?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*/.match(pre_text)
+
+    if m
+      annotations = m[0].split(LINE_BREAK_REGEXP)
+      modifiers_text = pre_text.slice(m[0].length .. -1)
+    end
 
     stop_marker = kind
     if kind == 'annotation'
@@ -183,7 +213,7 @@ class JavadocPopulator
     end
 
     modifiers_text = modifiers_text.slice(0, modifiers_text.index(stop_marker)).strip
-    modifiers = (modifiers_text.split(PARAM_SPLIT_REGEXP) || []).sort
+    modifiers = (modifiers_text.split(SPACES_REGEXP) || []).sort
 
     description = truncate(doc.css('.description .block').text())
 
@@ -261,6 +291,7 @@ class JavadocPopulator
       qualifiedClass: class_name,
       name: simple_class_name,
       qualifiedName: class_name,
+      annotations: annotations,
       modifiers: modifiers,
       since: since,
       kind: kind,
@@ -295,6 +326,9 @@ class JavadocPopulator
     end
 
     member[:description] = truncate(member[:description], 250)
+    member[:params].each do |param|
+      param.delete(:description)
+    end
 
     return member
   end
@@ -304,74 +338,111 @@ class JavadocPopulator
 
     methods = []
 
-    # memberSummary is for JDK 8
-    # overviewSummary is for JDK 7
-    doc.css('.memberSummary, .overviewSummary').each do |table|
-      unless table.attr('summary').include?('Method')
-        debug("no methods for #{class_name}")
+    method_detail_anchor = doc.css('.details h3').find do |element|
+      element.text().strip.downcase.include?('method detail')
+    end
+
+    if method_detail_anchor.nil?
+      return []
+    end
+
+    list_items = method_detail_anchor.parent.css('ul.blockList>li')
+
+    list_items.each do |item|
+
+      #puts "item = #{item}"
+
+      anchor_path = item.parent.previous_element.attr('name') || ''
+
+      path = make_class_path(package_name, simple_class_name) + '#' + anchor_path
+
+      signature = item.css('pre').first.text().strip
+
+      m = METHOD_SIGNATURE_REGEXP.match(signature)
+
+      unless m
+        debug("Can't match signature '#{signature}'")
         next
       end
 
-      table.css('tr').each do |tr|
-        modifier_and_type = tr.css('td.colFirst').text()
-        m = MODIFIER_AND_TYPE_REGEXP.match(modifier_and_type)
+      annotations = (m[1] || '').strip.split(LINE_BREAK_REGEXP)
+      modifiers = (m[2] || '').strip.split(SPACES_REGEXP).sort
+      return_type = m[3]
+      method_name = m[4]
+      params = parse_parameters(m[5])
+      throws_text = m[6]
 
-        if !m
-          debug("can't match modifier and type for #{class_name}")
-          next
-        end
-
-        modifiers = []
-
-        if m[2] && (m[2].length > 0)
-          modifiers = m[2].split(/[[:space:]]+/).sort
-        end
-
-        return_type = m[3]
-
-        text = tr.css('td.colLast').text()
-
-        m = /^\s*(\w+)\(([^)]*)\)\s*(.*?)\s*$/.match(text)
-
-        unless m
-          puts "Can't parse last column text: '#{text}'."
-          next
-        end
-
-        method_name = m[1].strip.scrub
-        description = truncate(m[3])
-
-        params = parse_parameters(m[2])
-
-        anchor_path = tr.css('td.colLast a').first.attr('href')
-
-        pound_index = anchor_path.index('#')
-
-        anchor_path = anchor_path.slice(pound_index, anchor_path.length - pound_index)
-
-        output_doc = {
-          class: simple_class_name,
-          qualifiedClass: class_name,
-          name: method_name,
-          qualifiedName: class_name + '.' + method_name,
-          modifiers: modifiers,
-          path: make_class_path(package_name, simple_class_name) + anchor_path,
-          params: params,
-          returnType: return_type,
-          kind: 'method',
-          description: description,
-          recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
-        }
-
-        out.write(",\n")
-        out.write(output_doc.to_json)
-
-        #puts output_doc.to_json
-
-        debug(output_doc.to_json)
-
-        methods << abbreviate_member(output_doc)
+      throws = []
+      if throws_text
+        throws = throws_text.strip.split(/[[:space:]],[[:space:]]/)
       end
+
+      debug("path = '#{path}', annotations = #{annotations}, modifiers = #{modifiers}, return_type = '#{return_type}', name = '#{method_name}', params = #{params}, throws = #{throws}")
+
+      description = nil
+      description_block = item.css('.block').first
+
+      if description_block
+        description = truncate(description_block.text().strip)
+      end
+
+      parameters_label = item.css('dt').find do |dt|
+        dt.text().downcase.include?('parameters:')
+      end
+
+      if parameters_label
+        dd = parameters_label.next_element
+
+        while dd && (dd.name == 'dd') do
+          m = /(\w+)[[:space:]]+(?:\-[[:space:]])*(.+)/.match(dd.text().strip)
+
+          if m
+            param_name = m[1]
+            param_description = m[2]
+            param = params.find do |p|
+              p[:name] == param_name
+            end
+
+            if param
+              param[:description] = truncate(param_description, 250)
+            end
+          end
+
+          dd = dd.next_element
+        end
+      end
+
+      returns_label = item.css('dt').find do |dt|
+        dt.text().downcase.include?('returns:')
+      end
+
+      returns_description = nil
+      if returns_label
+        returns_description = returns_label.next_element.text().strip
+      end
+
+      output_doc = {
+        class: simple_class_name,
+        qualifiedClass: class_name,
+        name: method_name,
+        qualifiedName: class_name + '.' + method_name,
+        annotations: annotations,
+        modifiers: modifiers,
+        path: path,
+        params: params,
+        returnType: return_type,
+        returns: returns_description,
+        throws: throws,
+        kind: 'method',
+        description: description,
+        recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
+      }
+
+      out.write(",\n")
+      output_json = output_doc.to_json
+      out.write(output_json)
+
+      debug(output_json)
     end
 
     debug("done find_methods for #{class_name}")
@@ -405,7 +476,7 @@ class JavadocPopulator
   end
 end
 
-output_filename = 'jdk8-doc.json'
+output_filename = 'jdk7-doc.json'
 
 if ARGV.length > 1
   output_filename = ARGV[1]
