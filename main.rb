@@ -2,6 +2,7 @@ require 'json'
 require 'set'
 require 'nokogiri'
 
+ANNOTATIONS_REGEXP = /(?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*/
 METHOD_SIGNATURE_REGEXP = /^((?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*)((?:public|protected|private|abstract|static|final)[[:space:]]+)*([^(]+?)[[:space:]]+(\w+)[[:space:]]*\(([^)]*)\)[[:space:]]*(?:throws[[:space:]]+(.+))?/
 SPACES_REGEXP = /[[:space:]]+/
 LINE_BREAK_REGEXP = /[[:space:]]*[\r\n]+[[:space:]]*/
@@ -130,9 +131,9 @@ class JavadocPopulator
 
           class_name = class_name.slice(0, class_name.length - 5).gsub('/', '.')
 
-          # unless class_name == 'java.io.InputStream'
-          #   next
-          # end
+           # unless class_name == 'javax.security.auth.Policy'
+           #   next
+           # end
 
           simple_class_name = simple_filename.slice(0, simple_filename.length - 5)
 
@@ -197,10 +198,11 @@ class JavadocPopulator
 
     annotations = []
 
-    pre_text = doc.css('.description ul.blockList li.blockList pre').text().strip
+    pre_element = doc.css('.description ul.blockList li.blockList>pre').first
+    pre_text = pre_element.text().strip
     modifiers_text = pre_text
 
-    m = /(?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*/.match(pre_text)
+    m = ANNOTATIONS_REGEXP.match(pre_text)
 
     if m
       annotations = m[0].split(LINE_BREAK_REGEXP)
@@ -215,7 +217,12 @@ class JavadocPopulator
     modifiers_text = modifiers_text.slice(0, modifiers_text.index(stop_marker)).strip
     modifiers = (modifiers_text.split(SPACES_REGEXP) || []).sort
 
-    description = truncate(doc.css('.description .block').text())
+    description_block = pre_element.next_element
+
+    description = nil
+    if description_block && (description_block.attr('class') == 'block')
+      description = truncate(description_block.text())
+    end
 
     super_class = nil
 
@@ -443,6 +450,8 @@ class JavadocPopulator
       out.write(output_json)
 
       debug(output_json)
+
+      methods << output_doc
     end
 
     debug("done find_methods for #{class_name}")
