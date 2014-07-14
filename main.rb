@@ -497,3 +497,4 @@ if ARGV.length > 1
 end
 
 JavadocPopulator.new(ARGV[0], output_filename).populate
+system("bzip2 -kf #{output_filename}")
