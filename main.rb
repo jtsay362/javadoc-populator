@@ -456,7 +456,7 @@ class JavadocPopulator
 
       debug(output_json)
 
-      methods << output_doc
+      methods << abbreviate_member(output_doc)
     end
 
     debug("done find_methods for #{class_name}")
