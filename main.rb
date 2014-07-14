@@ -445,7 +445,12 @@ class JavadocPopulator
         recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
       }
 
-      out.write(",\n")
+      if @first_document
+        @first_document = false
+      else
+        out.write(",\n")
+      end
+
       output_json = output_doc.to_json
       out.write(output_json)
 
