@@ -131,7 +131,7 @@ class JavadocPopulator
 
           class_name = class_name.slice(0, class_name.length - 5).gsub('/', '.')
 
-           # unless class_name == 'javax.security.auth.Policy'
+           # unless class_name == 'java.util.LinkedList'
            #   next
            # end
 
@@ -225,38 +225,39 @@ class JavadocPopulator
     end
 
     super_class = nil
-
-    if kind == 'class'
-      super_class_a = doc.css('ul.inheritance li a').last
-
-      if super_class_a
-        super_class = super_class_a.text().strip
-      end
-
-      if !super_class && (kind != 'interface')
-        super_class = 'java.lang.Object'
-      end
-    end
+    implements = []
 
     if kind != 'annotation'
-      implements = []
+      if kind == 'class'
+        super_class_a = doc.css('ul.inheritance li a').last
 
-      dd = nil
+        if super_class_a
+          super_class = super_class_a.text().strip
+        end
+
+        if !super_class
+          super_class = 'java.lang.Object'
+        end
+      elsif kind == 'enum'
+        super_class = 'java.lang.Enum'
+      end
+
+      dt = nil
 
       if kind == 'interface'
         dt = doc.css('.description ul.blockList li.blockList dl dt').find do |dt|
-          dt.text.include?('Superinterface')
-        end
-
-        if dt
-          dd = dt.parent.css('dd').first
+          dt.text.downcase.include?('superinterface')
         end
       else
-        dd = doc.css('.description ul.blockList li.blockList dl dd').first
+        dt = doc.css('.description ul.blockList li.blockList dl dt').find do |dt|
+          text = dt.text.downcase
+          text.include?('implemented') && text.include?('interface')
+        end
       end
 
       # Messes up for Comparable<Date>
-      if dd
+      if dt
+        dd = dt.parent.css('dd').first
         links = dd.css('a')
 
         implements = (links.collect do |a|
@@ -307,7 +308,7 @@ class JavadocPopulator
       recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass'],
     }
 
-    if kind == 'class'
+    if (kind == 'class') || (kind == 'enum')
       output_doc[:superClass] = super_class
       output_doc[:methods] = methods
       output_doc[:implements] = implements
