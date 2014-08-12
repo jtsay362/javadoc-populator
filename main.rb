@@ -43,11 +43,13 @@ class JavadocPopulator
       "properties" : {
         "class" : {
           "type" : "string",
-          "index" : "not_analyzed"
+          "index" : "analyzed",
+          "analyzer" : "simple"
         },
         "qualifiedClass" : {
           "type" : "string",
-          "index" : "not_analyzed"
+          "index" : "analyzed",
+          "analyzer" : "simple"
         },
         "annotations" : {
           "type" : "object",
@@ -71,11 +73,13 @@ class JavadocPopulator
         },
         "name" : {
           "type" : "string",
-          "index" : "analyzed"
+          "index" : "analyzed",
+          "analyzer" : "simple"
         },
         "qualifiedName" : {
           "type" : "string",
-          "index" : "not_analyzed"
+          "index" : "analyzed",
+          "analyzer" : "simple"
         },
         "path" : {
           "type" : "string",
