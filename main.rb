@@ -50,9 +50,11 @@ class JavadocPopulator
           "index" : "not_analyzed"
         },
         "annotations" : {
-          "index" : "no"
+          "type" : "object",
+          "enabled" : false
         },
         "modifiers" : {
+          "type" : "string",
           "index" : "no"
         },
         "kind" : {
@@ -80,19 +82,24 @@ class JavadocPopulator
           "index" : "no"
         },
         "recognitionKeys" : {
+          "type" : "string",
           "index" : "no"
         },
         "superClass" : {
+          "type" : "string",
           "index" : "no"
         },
         "implements" : {
+          "type" : "string",
           "index" : "no"
         },
         "methods" : {
-          "index" : "no"
+          "type" : "object",
+          "enabled" : false
         },
         "params" : {
-          "index" : "no"
+          "type" : "object",
+          "enabled" : false
         },
         "returnType" : {
           "type" : "string",
@@ -103,6 +110,7 @@ class JavadocPopulator
           "index" : "no"
         },
         "throws" : {
+          "type" : "string",
           "index" : "no"
         }
       }
