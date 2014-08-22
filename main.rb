@@ -116,6 +116,12 @@ class JavadocPopulator
         "throws" : {
           "type" : "string",
           "index" : "no"
+        },
+        "packageBoost" : {
+          "type" : "float",
+          "store" : true,
+          "null_value" : 1.0,
+          "coerce" : false
         }
       }
     }
@@ -317,6 +323,7 @@ class JavadocPopulator
       kind: kind,
       description: description,
       path: make_class_path(package_name, simple_class_name),
+      packageBoost: package_boost(package_name),
       recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass'],
     }
 
@@ -455,6 +462,7 @@ class JavadocPopulator
         throws: throws,
         kind: 'method',
         description: description,
+        packageBoost: package_boost(package_name),
         recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
       }
 
@@ -500,6 +508,16 @@ class JavadocPopulator
     end
 
     params
+  end
+
+  def package_boost(package_name)
+    if package_name.start_with?('java.awt.')
+      return 0.7
+    elsif package_name.start_with?('java.') || package_name.start_with?('javax.')
+      return 1.0
+    else
+      return 0.8
+    end
   end
 end
 
