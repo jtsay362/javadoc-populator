@@ -515,10 +515,14 @@ class JavadocPopulator
       return 0.7
     elsif package_name.start_with?('java.sql')
       return 0.9 # because java.sql.Date conflicts with java.util.Date
-    elsif package_name.start_with?('java.') || package_name.start_with?('javax.')
+    elsif package_name.start_with?('java.lang')
       return 1.0
+    elsif package_name.start_with?('java.')
+      return 0.95
+    elsif package_name.start_with?('javax.')
+      return 0.9 # because javax.print.DocFlavor.STRING conflicts with java.lang.String
     else
-      return 0.8
+      return 0.6
     end
   end
 end
