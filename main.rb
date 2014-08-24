@@ -511,8 +511,10 @@ class JavadocPopulator
   end
 
   def package_boost(package_name)
-    if package_name.start_with?('java.awt.')
+    if package_name.start_with?('java.awt')
       return 0.7
+    elsif package_name.start_with?('java.sql')
+      return 0.9 # because java.sql.Date conflicts with java.util.Date
     elsif package_name.start_with?('java.') || package_name.start_with?('javax.')
       return 1.0
     else
