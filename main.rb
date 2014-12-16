@@ -3,6 +3,7 @@ require 'set'
 require 'nokogiri'
 
 ANNOTATIONS_REGEXP = /(?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*/
+CONSTRUCTOR_SIGNATURE_REGEXP = /^((?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*)((?:public|protected|private)[[:space:]]+)*(\w+)[[:space:]]*\(([^)]*)\)[[:space:]]*(?:throws[[:space:]]+(.+))?/
 METHOD_SIGNATURE_REGEXP = /^((?:@[\w\.]+(?:\([^)]*\))?[[:space:]])*)((?:public|protected|private|abstract|static|final)[[:space:]]+)*([^(]+?)[[:space:]]+(\w+)[[:space:]]*\(([^)]*)\)[[:space:]]*(?:throws[[:space:]]+(.+))?/
 SPACES_REGEXP = /[[:space:]]+/
 LINE_BREAK_REGEXP = /[[:space:]]*[\r\n]+[[:space:]]*/
@@ -10,6 +11,9 @@ PARAM_SPLIT_REGEXP = /[[:space:]]*,[[:space:]]*?[\r\n]+[[:space:]]*/
 PARAM_REGEXP = /[[:space:]]*(.+?)[[:space:]]+(\w+)$/
 
 ABBREVIATED_MEMBER_KEYS = [:name, :params, :returnType, :modifiers, :description, :path].to_set
+
+KIND_CONSTRUCTOR = 'constructor'
+KIND_METHOD = 'method'
 
 class JavadocPopulator
   def initialize(dir_path, output_path, debug_mode=false)
@@ -97,6 +101,10 @@ class JavadocPopulator
           "type" : "string",
           "index" : "no"
         },
+        "constructors" : {
+          "type" : "object",
+          "enabled" : false
+        },
         "methods" : {
           "type" : "object",
           "enabled" : false
@@ -162,8 +170,9 @@ class JavadocPopulator
 
             package_name = doc.css('.header .subTitle').text()
 
+            constructors = find_constructors(doc, package_name, class_name, simple_class_name, out)
             methods = find_methods(doc, package_name, class_name, simple_class_name, out)
-            add_class(doc, package_name, class_name, simple_class_name, methods, out)
+            add_class(doc, package_name, class_name, simple_class_name, constructors, methods, out)
             num_classes_found += 1
 
             # if num_classes_found > 10
@@ -201,7 +210,7 @@ class JavadocPopulator
     return package_name.gsub(/\./, '/') + '/' + simple_class_name + '.html'
   end
 
-  def add_class(doc, package_name, class_name, simple_class_name, methods, out)
+  def add_class(doc, package_name, class_name, simple_class_name, constructors, methods, out)
     kind = 'class'
 
     title = doc.css('.header h2').text().strip
@@ -327,6 +336,10 @@ class JavadocPopulator
       recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass'],
     }
 
+    if kind == 'class'
+      output_doc[:constructors] = constructors
+    end
+
     if (kind == 'class') || (kind == 'enum')
       output_doc[:superClass] = super_class
       output_doc[:methods] = methods
@@ -360,13 +373,33 @@ class JavadocPopulator
     return member
   end
 
+  def find_constructors(doc, package_name, class_name, simple_class_name, out)
+    find_invokable(KIND_CONSTRUCTOR, doc, package_name, class_name, simple_class_name, out)
+  end
+
+
   def find_methods(doc, package_name, class_name, simple_class_name, out)
-    debug("find_methods for #{class_name}")
+    find_invokable(KIND_METHOD, doc, package_name, class_name, simple_class_name, out)
+  end
+
+  def find_invokable(kind, doc, package_name, class_name, simple_class_name, out)
+    debug("find_invokable for #{class_name}")
 
     methods = []
 
+    header_text_to_find = nil
+    signature_regexp = nil
+
+    if kind == KIND_CONSTRUCTOR
+      header_text_to_find = 'constructor detail'
+      signature_regexp = CONSTRUCTOR_SIGNATURE_REGEXP
+    else
+      header_text_to_find = 'method detail'
+      signature_regexp = METHOD_SIGNATURE_REGEXP
+    end
+
     method_detail_anchor = doc.css('.details h3').find do |element|
-      element.text().strip.downcase.include?('method detail')
+      element.text().strip.downcase.include?(header_text_to_find)
     end
 
     if method_detail_anchor.nil?
@@ -385,7 +418,7 @@ class JavadocPopulator
 
       signature = item.css('pre').first.text().strip
 
-      m = METHOD_SIGNATURE_REGEXP.match(signature)
+      m = signature_regexp.match(signature)
 
       unless m
         debug("Can't match signature '#{signature}'")
@@ -394,10 +427,19 @@ class JavadocPopulator
 
       annotations = (m[1] || '').strip.split(LINE_BREAK_REGEXP)
       modifiers = (m[2] || '').strip.split(SPACES_REGEXP).sort
-      return_type = m[3]
-      method_name = m[4]
-      params = parse_parameters(m[5])
-      throws_text = m[6]
+
+      group_offset = 0
+      return_type = nil
+
+      if kind == KIND_CONSTRUCTOR
+        group_offset = -1
+      else
+        return_type = m[3]
+      end
+
+      method_name = m[4 + group_offset]
+      params = parse_parameters(m[5 + group_offset])
+      throws_text = m[6 + group_offset]
 
       throws = []
       if throws_text
@@ -407,7 +449,8 @@ class JavadocPopulator
       debug("path = '#{path}', annotations = #{annotations}, modifiers = #{modifiers}, return_type = '#{return_type}', name = '#{method_name}', params = #{params}, throws = #{throws}")
 
       description = nil
-      description_block = item.css('.block').first
+      # Skip deprecated blocks
+      description_block = item.css('.block').last
 
       if description_block
         description = truncate(description_block.text().strip)
@@ -439,15 +482,6 @@ class JavadocPopulator
         end
       end
 
-      returns_label = item.css('dt').find do |dt|
-        dt.text().downcase.include?('returns:')
-      end
-
-      returns_description = nil
-      if returns_label
-        returns_description = returns_label.next_element.text().strip
-      end
-
       output_doc = {
         class: simple_class_name,
         qualifiedClass: class_name,
@@ -457,32 +491,45 @@ class JavadocPopulator
         modifiers: modifiers,
         path: path,
         params: params,
-        returnType: return_type,
-        returns: returns_description,
         throws: throws,
-        kind: 'method',
+        kind: kind,
         description: description,
         packageBoost: package_boost(package_name),
-        recognitionKeys: ['com.solveforall.recognition.programming.java.JdkMethod']
+        recognitionKeys: ['com.solveforall.recognition.programming.java.Jdk' + kind.capitalize]
       }
 
-      if @first_document
-        @first_document = false
-      else
-        out.write(",\n")
+      # Don't add constructors to the index, as it makes searching for classes hard
+      if kind == KIND_METHOD
+        returns_label = item.css('dt').find do |dt|
+          dt.text().downcase.include?('returns:')
+        end
+
+        returns_description = nil
+        if returns_label
+          returns_description = returns_label.next_element.text().strip
+        end
+
+        output_doc[:returnType] = return_type
+        output_doc[:returns] = returns_description
+
+        if @first_document
+          @first_document = false
+        else
+          out.write(",\n")
+        end
+
+        output_json = output_doc.to_json
+        out.write(output_json)
+
+        debug(output_json)
       end
-
-      output_json = output_doc.to_json
-      out.write(output_json)
-
-      debug(output_json)
 
       methods << abbreviate_member(output_doc)
     end
 
     debug("done find_methods for #{class_name}")
 
-    return methods
+    methods
   end
 
   def parse_parameters(params_text)
