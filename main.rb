@@ -12,8 +12,21 @@ PARAM_REGEXP = /[[:space:]]*(.+?)[[:space:]]+(\w+)$/
 
 ABBREVIATED_MEMBER_KEYS = [:name, :params, :returnType, :modifiers, :description, :path].to_set
 
+KIND_CLASS = 'class'
+KIND_INTERFACE = 'interface'
+KIND_ENUM = 'enum'
+KIND_ANNOTATION = 'annotation'
 KIND_CONSTRUCTOR = 'constructor'
 KIND_METHOD = 'method'
+
+KIND_TO_WEIGHT = {
+  KIND_CLASS => 100,
+  KIND_INTERFACE => 100,
+  KIND_ENUM => 100,
+  KIND_ANNOTATION => 70,
+  KIND_CONSTRUCTOR => 1,
+  KIND_METHOD => 50
+}
 
 class JavadocPopulator
   def initialize(dir_path, output_path, debug_mode=false)
@@ -40,6 +53,17 @@ class JavadocPopulator
       out.write <<-eos
 {
   "metadata" : {
+    "settings" : {
+      "analysis": {
+        "analyzer" : {
+          "lower_keyword" : {
+            "type" : "custom",
+            "tokenizer": "keyword",
+            "filter" : ["lowercase"]
+          }
+        }
+      }
+    },
     "mapping" : {
       "_all" : {
         "enabled" : false
@@ -53,7 +77,7 @@ class JavadocPopulator
         "qualifiedClass" : {
           "type" : "string",
           "index" : "analyzed",
-          "analyzer" : "simple"
+          "analyzer" : "lower_keyword"
         },
         "annotations" : {
           "type" : "object",
@@ -83,7 +107,7 @@ class JavadocPopulator
         "qualifiedName" : {
           "type" : "string",
           "index" : "analyzed",
-          "analyzer" : "simple"
+          "analyzer" : "lower_keyword"
         },
         "path" : {
           "type" : "string",
@@ -125,11 +149,15 @@ class JavadocPopulator
           "type" : "string",
           "index" : "no"
         },
-        "packageBoost" : {
+        "weight" : {
           "type" : "float",
           "store" : true,
           "null_value" : 1.0,
           "coerce" : false
+        },
+        "suggest" : {
+          "type" : "completion",
+          "analyzer" : "lower_keyword"
         }
       }
     }
@@ -211,16 +239,16 @@ class JavadocPopulator
   end
 
   def add_class(doc, package_name, class_name, simple_class_name, constructors, methods, out)
-    kind = 'class'
+    kind = KIND_CLASS
 
     title = doc.css('.header h2').text().strip
 
     if title.start_with?('Interface')
-      kind = 'interface'
+      kind = KIND_INTERFACE
     elsif title.start_with?('Enum')
-      kind = 'enum'
+      kind = KIND_ENUM
     elsif title.start_with?('Annotation')
-      kind = 'annotation'
+      kind = KIND_ANNOTATION
     end
 
     annotations = []
@@ -237,7 +265,7 @@ class JavadocPopulator
     end
 
     stop_marker = kind
-    if kind == 'annotation'
+    if kind == KIND_ANNOTATION
       stop_marker = '@'
     end
 
@@ -254,8 +282,8 @@ class JavadocPopulator
     super_class = nil
     implements = []
 
-    if kind != 'annotation'
-      if kind == 'class'
+    if kind != KIND_ANNOTATION
+      if kind == KIND_CLASS
         super_class_a = doc.css('ul.inheritance li a').last
 
         if super_class_a
@@ -265,13 +293,13 @@ class JavadocPopulator
         if !super_class
           super_class = 'java.lang.Object'
         end
-      elsif kind == 'enum'
+      elsif kind == KIND_ENUM
         super_class = 'java.lang.Enum'
       end
 
       dt = nil
 
-      if kind == 'interface'
+      if kind == KIND_INTERFACE
         dt = doc.css('.description ul.blockList li.blockList dl dt').find do |dt|
           dt.text.downcase.include?('superinterface')
         end
@@ -282,29 +310,9 @@ class JavadocPopulator
         end
       end
 
-      # Messes up for Comparable<Date>
       if dt
         dd = dt.parent.css('dd').first
-        links = dd.css('a')
-
-        implements = (links.collect do |a|
-          title = a.attr('title')
-          package = nil
-
-          m = /.+[[:space:]]+([\w\.]+)$/.match(title)
-
-          if m
-            package = m[1].strip.scrub
-          end
-
-          simple = a.text().strip.scrub
-
-          if package
-            package + '.' + simple
-          else
-            simple
-          end
-        end).sort
+        implements = parse_implements(dd.text())
       end
     end
 
@@ -320,6 +328,8 @@ class JavadocPopulator
 
     #puts "#{class_name} description: '#{description}'"
 
+    weight = compute_weight(package_name, kind)
+
     output_doc = {
       _id: class_name,
       class: simple_class_name,
@@ -332,19 +342,24 @@ class JavadocPopulator
       kind: kind,
       description: description,
       path: make_class_path(package_name, simple_class_name),
-      packageBoost: package_boost(package_name),
+      weight: weight * 0.01,
       recognitionKeys: ['com.solveforall.recognition.programming.java.JdkClass'],
+      suggest: {
+        input: [simple_class_name, class_name],
+        output: class_name,
+        weight: weight
+      }
     }
 
-    if kind == 'class'
+    if kind == KIND_CLASS
       output_doc[:constructors] = constructors
     end
 
-    if (kind == 'class') || (kind == 'enum')
+    if (kind == KIND_CLASS) || (kind == KIND_ENUM)
       output_doc[:superClass] = super_class
       output_doc[:methods] = methods
       output_doc[:implements] = implements
-    elsif kind == 'interface'
+    elsif kind == KIND_INTERFACE
       output_doc[:methods] = methods
       output_doc[:implements] = implements
     end
@@ -482,11 +497,15 @@ class JavadocPopulator
         end
       end
 
+      weight = compute_weight(package_name, kind)
+
+      qualified_name = class_name + '.' + method_name
+
       output_doc = {
         class: simple_class_name,
         qualifiedClass: class_name,
         name: method_name,
-        qualifiedName: class_name + '.' + method_name,
+        qualifiedName: qualified_name,
         annotations: annotations,
         modifiers: modifiers,
         path: path,
@@ -494,8 +513,13 @@ class JavadocPopulator
         throws: throws,
         kind: kind,
         description: description,
-        packageBoost: package_boost(package_name),
-        recognitionKeys: ['com.solveforall.recognition.programming.java.Jdk' + kind.capitalize]
+        weight: weight * 0.01,
+        recognitionKeys: ['com.solveforall.recognition.programming.java.Jdk' + kind.capitalize],
+        suggest: {
+          input: [qualified_name, method_name, simple_class_name + '.' + method_name],
+          output: qualified_name,
+          weight: weight
+        }
       }
 
       # Don't add constructors to the index, as it makes searching for classes hard
@@ -557,6 +581,48 @@ class JavadocPopulator
     params
   end
 
+  def parse_implements(text)
+    text = text.strip
+
+    start_index = 0
+    bracket_count = 0
+    index = 0
+    rv = []
+
+    text.each_char do |c|
+      if c == '<'
+        bracket_count += 1
+      elsif bracket_count == 0
+        if (c == ',') || c.strip.empty?
+          if index > start_index
+            rv << text.slice(start_index ... index)
+          end
+          start_index = index + 1
+        end
+      elsif c == '>'
+        bracket_count -= 1
+
+        if bracket_count == 0
+          rv << text.slice(start_index .. index)
+          start_index = index + 1
+        end
+      end
+
+      index += 1
+    end
+
+    if text.length > start_index
+      rv << text.slice(start_index, text.length)
+    end
+
+    rv
+  end
+
+  def compute_weight(package_name, kind)
+    pb = package_boost(package_name)
+    [pb * 10 * KIND_TO_WEIGHT[kind], 1].max.to_i
+  end
+
   def package_boost(package_name)
     if package_name.start_with?('java.awt')
       return 0.7
@@ -568,6 +634,8 @@ class JavadocPopulator
       return 0.95
     elsif package_name.start_with?('javax.')
       return 0.9 # because javax.print.DocFlavor.STRING conflicts with java.lang.String
+    elsif package_name.include?('CORBA')
+      return 0.2
     else
       return 0.6
     end
