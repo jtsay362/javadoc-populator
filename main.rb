@@ -55,11 +55,18 @@ class JavadocPopulator
   "metadata" : {
     "settings" : {
       "analysis": {
+        "char_filter" : {
+          "no_special" : {
+            "type" : "mapping",
+            "mappings" : [".=>", "\\\\u0020=>"]
+          }
+        },
         "analyzer" : {
           "lower_keyword" : {
             "type" : "custom",
             "tokenizer": "keyword",
-            "filter" : ["lowercase"]
+            "filter" : ["lowercase"],
+            "char_filter" : ["no_special"]
           }
         }
       }
@@ -97,7 +104,8 @@ class JavadocPopulator
         },
         "description" : {
           "type" : "string",
-          "index" : "analyzed"
+          "index" : "analyzed",
+          "analyzer" : "english"
         },
         "name" : {
           "type" : "string",
