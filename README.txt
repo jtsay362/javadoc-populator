@@ -11,3 +11,7 @@ should output jdk7-doc.json.bz2 which can then be uploaded.
 Also works with JDK 8 Javadocs, but they seem to be non-redistributable.
 
 See https://solveforall.com/docs/developer/semantic_data_collection for more info.
+
+License
+
+This project is licensed with the Apache License, Version 2.0. See LICENSE.
